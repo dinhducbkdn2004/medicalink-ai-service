@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "medicalink-ai"
+version = "0.1.0"
+description = "Worker RAG gợi ý bác sĩ — Qdrant, RabbitMQ, OpenAI embedding, LLM OpenAI/Gemini"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "Medicalink" }]
+keywords = ["rag", "qdrant", "rabbitmq", "medical"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+# Cài deps: pip install -r requirements.txt trước, rồi pip install . --no-deps
+dependencies = []
+
+[project.scripts]
+medicalink-ai-worker = "medicalink_ai.worker:main"
+medicalink-ai-sync = "medicalink_ai.scripts.batch_sync:cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["medicalink_ai*"]

@@ -51,13 +51,21 @@ async def main() -> None:
         raise SystemExit("Thiếu OPENAI_API_KEY")
 
     openai = AsyncOpenAI(api_key=s.openai_api_key)
-    qdrant = AsyncQdrantClient(url=s.qdrant_url)
+    qdrant_kw: dict[str, Any] = {"url": s.qdrant_url}
+    if (s.qdrant_api_key or "").strip():
+        qdrant_kw["api_key"] = s.qdrant_api_key.strip()
+    qdrant = AsyncQdrantClient(**qdrant_kw)
     store = DoctorVectorStore(
         qdrant=qdrant,
         openai=openai,
         collection_name=s.qdrant_collection_name,
         embedding_model=s.openai_embedding_model,
         openai_api_key=s.openai_api_key,
+        hybrid_enabled=s.rag_hybrid_enabled,
+        dense_name=s.dense_vector_name,
+        sparse_name=s.sparse_vector_name,
+        sparse_model_name=s.fastembed_sparse_model,
+        prefetch_limit=s.retrieval_prefetch_limit,
     )
     await store.ensure_collection()
 
@@ -73,5 +81,10 @@ async def main() -> None:
     logger.info("Batch sync done.")
 
 
-if __name__ == "__main__":
+def cli() -> None:
+    """Entry point cho `medicalink-ai-sync` (console_scripts)."""
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    cli()

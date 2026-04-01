@@ -47,21 +47,34 @@ def _nest_rpc_reply(
 async def run_worker(settings: Settings | None = None) -> None:
     s = settings or get_settings()
     if not s.openai_api_key:
-        raise RuntimeError("Thiếu OPENAI_API_KEY")
+        raise RuntimeError("Thiếu OPENAI_API_KEY (cần cho embedding).")
+    prov = (s.llm_provider or "openai").strip().lower()
+    if prov == "gemini" and not (s.google_genai_api_key or "").strip():
+        raise RuntimeError(
+            "Thiếu GOOGLE_GENAI_API_KEY hoặc GEMINI_API_KEY khi LLM_PROVIDER=gemini."
+        )
 
     openai_client = AsyncOpenAI(api_key=s.openai_api_key)
-    qdrant = AsyncQdrantClient(url=s.qdrant_url)
+    qdrant_kw: dict[str, Any] = {"url": s.qdrant_url}
+    if (s.qdrant_api_key or "").strip():
+        qdrant_kw["api_key"] = s.qdrant_api_key.strip()
+    qdrant = AsyncQdrantClient(**qdrant_kw)
     store = DoctorVectorStore(
         qdrant=qdrant,
         openai=openai_client,
         collection_name=s.qdrant_collection_name,
         embedding_model=s.openai_embedding_model,
         openai_api_key=s.openai_api_key,
+        hybrid_enabled=s.rag_hybrid_enabled,
+        dense_name=s.dense_vector_name,
+        sparse_name=s.sparse_vector_name,
+        sparse_model_name=s.fastembed_sparse_model,
+        prefetch_limit=s.retrieval_prefetch_limit,
     )
     rag = DoctorRagService(
         store=store,
         openai=openai_client,
-        chat_model=s.openai_chat_model,
+        settings=s,
     )
 
     connection = await aio_pika.connect_robust(s.rabbitmq_url)

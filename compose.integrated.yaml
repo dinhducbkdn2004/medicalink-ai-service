@@ -1,0 +1,33 @@
+# Gắn worker AI vào mạng cố định medicalink-network (medicalink-microservice).
+#
+# Trình tự:
+#   1) medicalink-microservice:  pnpm dev-docker:up
+#   2) Chạy API Gateway + microservices cần thiết trên host (vd. pnpm start:gateway) HOẶC deploy full stack
+#   3) medicalink-ai-service:    copy .env.docker.example → .env, chỉnh OPENAI_API_KEY
+#   4) docker compose -f compose.integrated.yaml up -d --build
+#
+# Batch sync (một lần): docker compose -f compose.integrated.yaml run --rm medicalink-ai medicalink-ai-sync
+
+services:
+  medicalink-ai:
+    build: .
+    image: medicalink-ai:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - medicalink_ai_cache:/app/.cache
+      - ./data:/app/data
+    # Cho phép container gọi API Gateway chạy trên máy host (Linux Docker 20.10+)
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - medicalink-network
+
+volumes:
+  medicalink_ai_cache:
+
+networks:
+  medicalink-network:
+    external: true
+    name: medicalink-network
