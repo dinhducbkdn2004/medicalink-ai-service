@@ -10,6 +10,7 @@ from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient
 
 from medicalink_ai.config import Settings, get_settings
+from medicalink_ai.intent_specialty import suggest_specialties_from_catalog
 from medicalink_ai.rag import DoctorRagService
 from medicalink_ai.vector_store import DoctorVectorStore
 
@@ -19,7 +20,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-AI_PATTERN = "ai.doctor-recommendation.request"
+AI_PATTERN_RECOMMEND = "ai.doctor-recommendation.request"
+AI_PATTERN_SUGGEST_SPECIALTIES = "ai.specialty-suggestion.request"
 DOCTOR_CREATED = "doctor.profile.created"
 DOCTOR_UPDATED = "doctor.profile.updated"
 DOCTOR_DELETED = "doctor.profile.deleted"
@@ -116,7 +118,49 @@ async def run_worker(settings: Settings | None = None) -> None:
                 raw = json.loads(message.body.decode("utf-8"))
                 pattern = raw.get("pattern")
                 data = raw.get("data") or {}
-                if pattern != AI_PATTERN:
+
+                if pattern == AI_PATTERN_SUGGEST_SPECIALTIES:
+                    symptoms_s = str(data.get("symptoms") or "").strip()
+                    raw_cats = data.get("specialties") or []
+                    catalog: list[dict[str, str]] = []
+                    if isinstance(raw_cats, list):
+                        for x in raw_cats:
+                            if isinstance(x, dict) and x.get("id"):
+                                catalog.append(
+                                    {
+                                        "id": str(x["id"]).strip(),
+                                        "name": str(x.get("name") or "").strip(),
+                                    }
+                                )
+                    if len(symptoms_s) < 8 or not catalog:
+                        await _nest_rpc_reply(
+                            ch_rpc,
+                            reply_to,
+                            corr,
+                            {
+                                "err": {
+                                    "status": "error",
+                                    "message": "symptoms (min 8 chars) and specialties[] are required",
+                                },
+                                "isDisposed": True,
+                            },
+                        )
+                        return
+                    result = await suggest_specialties_from_catalog(
+                        symptoms=symptoms_s,
+                        catalog=catalog,
+                        settings=s,
+                        openai=openai_client,
+                    )
+                    await _nest_rpc_reply(
+                        ch_rpc,
+                        reply_to,
+                        corr,
+                        {"response": result, "isDisposed": True},
+                    )
+                    return
+
+                if pattern != AI_PATTERN_RECOMMEND:
                     logger.warning("unknown RPC pattern %s", pattern)
                     await _nest_rpc_reply(
                         ch_rpc,
@@ -131,9 +175,20 @@ async def run_worker(settings: Settings | None = None) -> None:
                         },
                     )
                     return
+
                 symptoms = str(data.get("symptoms") or "").strip()
                 top_k = int(data.get("topK") or data.get("top_k") or 5)
                 top_k = max(1, min(top_k, 15))
+                raw_specs = data.get("specialtyIds") or data.get("specialty_ids")
+                spec_ids: list[str] | None = None
+                if isinstance(raw_specs, list) and raw_specs:
+                    spec_ids = [
+                        str(x).strip()
+                        for x in raw_specs
+                        if x is not None and str(x).strip()
+                    ]
+                    if not spec_ids:
+                        spec_ids = None
                 if not symptoms:
                     await _nest_rpc_reply(
                         ch_rpc,
@@ -148,7 +203,7 @@ async def run_worker(settings: Settings | None = None) -> None:
                         },
                     )
                     return
-                result = await rag.recommend(symptoms, top_k)
+                result = await rag.recommend(symptoms, top_k, specialty_ids=spec_ids)
                 await _nest_rpc_reply(
                     ch_rpc,
                     reply_to,
