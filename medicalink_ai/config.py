@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     flashrank_cache_dir: str = ".cache/flashrank"
     rag_rerank_pool: int = 36
 
+    # Khi query có intent “giỏi / lâu năm / kinh nghiệm”: cộng điểm theo seniority_score (payload).
+    rag_seniority_boost_weight: float = 0.18
+
     # Để trống = tắt. Ví dụ: ./data/rag_eval.jsonl
     rag_eval_log_path: str = ""
 

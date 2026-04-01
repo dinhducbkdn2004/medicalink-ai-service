@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 import uuid
 from typing import Any
 
@@ -43,6 +44,66 @@ def _locations_text(locations: Any) -> str:
         if name:
             parts.append(str(name))
     return ", ".join(parts) if parts else ""
+
+
+def _fold_ascii_lower(s: str) -> str:
+    t = unicodedata.normalize("NFKD", s.lower())
+    return "".join(c for c in t if not unicodedata.combining(c))
+
+
+def _compute_seniority_score(profile: dict[str, Any]) -> float:
+    """
+    Điểm 0..1 heuristic từ chức danh / học hàm / độ dài kinh nghiệm (không cần cột năm riêng ở DB).
+    Dùng boost khi user hỏi kiểu 'giỏi', 'lâu năm', 'giàu kinh nghiệm'.
+    """
+    score = 0.0
+    position = profile.get("position") or []
+    if isinstance(position, str):
+        position = [position]
+    degree = str(profile.get("degree") or "")
+    intro = str(profile.get("introduction") or "")
+    exp = profile.get("experience") or []
+    if isinstance(exp, str):
+        exp = [exp] if exp.strip() else []
+    n_exp = len([x for x in exp if str(x).strip()]) if isinstance(exp, list) else 0
+
+    blob = _fold_ascii_lower(
+        " ".join(str(p) for p in position if p)
+        + " "
+        + degree
+        + " "
+        + intro
+    )
+    if any(k in blob for k in ("truong khoa", "pho truong khoa")):
+        score += 0.35
+    if any(
+        k in blob
+        for k in (
+            "giao su",
+            "pho giao su",
+            " gs ",
+            " gs.",
+            " gs,",
+            " pgs ",
+            " pgs.",
+        )
+    ):
+        score += 0.28
+    if any(
+        k in blob
+        for k in (
+            "tien si",
+            " ths ",
+            " ths.",
+            "thac si",
+            "chuyen khoa ii",
+            "bs ckii",
+            "bsckii",
+        )
+    ):
+        score += 0.12
+    score += min(0.35, n_exp * 0.065)
+    return min(1.0, score)
 
 
 def build_doctor_document(profile: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -88,6 +149,8 @@ def build_doctor_document(profile: dict[str, Any]) -> tuple[str, dict[str, Any]]
         if isinstance(loc, dict) and loc.get("id") is not None:
             location_ids.append(str(loc["id"]))
 
+    seniority = _compute_seniority_score(profile)
+
     payload: dict[str, Any] = {
         "doctor_id": doctor_id,
         "staff_account_id": str(profile.get("staffAccountId") or ""),
@@ -95,7 +158,9 @@ def build_doctor_document(profile: dict[str, Any]) -> tuple[str, dict[str, Any]]
         "is_active": bool(profile.get("isActive", True)),
         "specialty_ids": specialty_ids,
         "specialties_label": specs,
+        "locations_label": locs,
         "location_ids": location_ids,
+        "seniority_score": seniority,
         "source_json": json.dumps(profile, ensure_ascii=False, default=str)[:8000],
     }
     return text, payload

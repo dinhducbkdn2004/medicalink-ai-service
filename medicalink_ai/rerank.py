@@ -31,13 +31,58 @@ def lexical_bonus(query: str, candidate: dict[str, Any]) -> float:
         return 0.0
     blob = " ".join(
         str(candidate.get(k) or "")
-        for k in ("full_name", "specialties_label", "source_json")
+        for k in (
+            "full_name",
+            "specialties_label",
+            "locations_label",
+            "source_json",
+        )
     )
     cset = _tokens(blob)
     if not cset:
         return 0.0
     inter = len(qset & cset)
     return min(1.0, inter / max(3.0, len(qset) * 0.5))
+
+
+def query_seniority_intent(query: str) -> float:
+    """1.0 nếu user nhấn mạnh tay nghề / kinh nghiệm; dùng chuỗi đã bỏ dấu."""
+    q = _normalize(query)
+    keys = (
+        "giau kinh nghiem",
+        "lau nam",
+        "gioi",
+        "gioi giau kinh nghiem",
+        "kinh nghiem",
+        "truong khoa",
+        "chuyen gia",
+        "tan tam",
+        "dau nganh",
+        "uy tin",
+    )
+    return 1.0 if any(k in q for k in keys) else 0.0
+
+
+def apply_seniority_boost(
+    query: str,
+    candidates: list[dict[str, Any]],
+    weight: float,
+) -> list[dict[str, Any]]:
+    if not candidates or weight <= 0:
+        return candidates
+    intent = query_seniority_intent(query)
+    if intent <= 0:
+        return candidates
+    enriched: list[tuple[float, dict[str, Any]]] = []
+    for c in candidates:
+        nc = dict(c)
+        base = float(nc.get("score") or 0.0)
+        sen = float(nc.get("seniority_score") or 0.0)
+        nc["score"] = base + weight * sen * intent
+        nc["rerank_seniority"] = True
+        enriched.append((nc["score"], nc))
+    enriched.sort(key=lambda x: x[0], reverse=True)
+    return [x[1] for x in enriched]
 
 
 def blend_scores(
@@ -97,6 +142,7 @@ def rerank_flashrank(
         text_parts = [
             str(c.get("full_name") or ""),
             str(c.get("specialties_label") or ""),
+            str(c.get("locations_label") or ""),
             (str(c.get("source_json") or ""))[:1200],
         ]
         passages.append({"id": did, "text": " | ".join(p for p in text_parts if p)})
@@ -133,15 +179,20 @@ def rerank_pipeline(
     flashrank_model: str,
     flashrank_cache_dir: str | None,
     flashrank_pool: int,
+    seniority_boost_weight: float = 0.0,
 ) -> list[dict[str, Any]]:
     if not candidates:
         return []
     pool = candidates[: min(len(candidates), flashrank_pool)]
     if mode == "none":
-        return pool
-    if mode == "lexical":
-        return blend_scores(query, pool, lexical_weight=max(0.0, min(lexical_weight, 0.9)))
-    if mode == "flashrank":
+        out = pool
+    elif mode == "lexical":
+        out = blend_scores(
+            query,
+            pool,
+            lexical_weight=max(0.0, min(lexical_weight, 0.9)),
+        )
+    elif mode == "flashrank":
         fr = rerank_flashrank(
             query,
             pool,
@@ -149,6 +200,9 @@ def rerank_pipeline(
             cache_dir=flashrank_cache_dir,
         )
         if lexical_weight > 0:
-            return blend_scores(query, fr, lexical_weight=lexical_weight * 0.5)
-        return fr
-    return pool
+            out = blend_scores(query, fr, lexical_weight=lexical_weight * 0.5)
+        else:
+            out = fr
+    else:
+        out = pool
+    return apply_seniority_boost(query, out, seniority_boost_weight)

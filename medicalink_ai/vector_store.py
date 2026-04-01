@@ -11,6 +11,7 @@ from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
+    MatchAny,
     MatchValue,
     PointStruct,
     SparseVectorParams,
@@ -173,7 +174,10 @@ class DoctorVectorStore:
                     "doctor_id": pl.get("doctor_id"),
                     "full_name": pl.get("full_name"),
                     "score": h.score,
+                    "specialty_ids": pl.get("specialty_ids") or [],
                     "specialties_label": pl.get("specialties_label"),
+                    "locations_label": pl.get("locations_label") or "",
+                    "seniority_score": float(pl.get("seniority_score") or 0.0),
                     "source_json": pl.get("source_json"),
                 }
             )
@@ -183,20 +187,28 @@ class DoctorVectorStore:
         self,
         query_text: str,
         limit: int,
+        *,
+        filter_specialty_ids: list[str] | None = None,
     ) -> tuple[list[dict[str, Any]], bool, bool]:
         """
         Trả về (candidates, hybrid_query_used, legacy_collection).
 
         - hybrid_query_used: True nếu chạy prefetch dense+sparse + RRF.
         - legacy_collection: True nếu collection chỉ có dense (schema cũ).
+        - filter_specialty_ids: nếu có — chỉ bác sĩ có ít nhất một id trong danh sách.
         """
         await self.ensure_collection()
         legacy = await self._read_legacy_flag()
-        flt = Filter(
-            must=[
-                FieldCondition(key="is_active", match=MatchValue(value=True)),
-            ]
-        )
+        must = [
+            FieldCondition(key="is_active", match=MatchValue(value=True)),
+        ]
+        if filter_specialty_ids:
+            ids = [str(x).strip() for x in filter_specialty_ids if str(x).strip()]
+            if ids:
+                must.append(
+                    FieldCondition(key="specialty_ids", match=MatchAny(any=ids)),
+                )
+        flt = Filter(must=must)
         vector = await self.embed_text(query_text)
 
         if legacy or not self.hybrid_enabled:
