@@ -38,15 +38,23 @@ class DoctorRagService:
         self.openai = openai
         self.settings = settings
 
-    async def recommend(self, symptoms: str, top_k: int) -> dict[str, Any]:
+    async def recommend(
+        self,
+        symptoms: str,
+        top_k: int,
+        *,
+        specialty_ids: list[str] | None = None,
+    ) -> dict[str, Any]:
         timer = StepTimer()
         top_k = max(1, min(top_k, 15))
         retrieve_limit = min(max(top_k * 6, 30), 80)
         prov = (self.settings.llm_provider or "openai").strip().lower()
+        spec_filter = specialty_ids or None
 
         candidates, hybrid_used, legacy_col = await self.store.search_active(
             symptoms,
             limit=retrieve_limit,
+            filter_specialty_ids=spec_filter,
         )
         if not candidates:
             out = {
