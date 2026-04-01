@@ -7,10 +7,12 @@ Giai đoạn 1 (MVP)
 - **Vector dense**: embedding câu văn ghép từ hồ sơ (OpenAI + LangChain).
 - **Payload**: metadata để filter (is_active), audit và hiển thị; không dùng OpenSearch.
 
-Giai đoạn 2 (Hybrid trên Qdrant, không thêm DB)
----------------------------------------------
-- Bổ sung **sparse vector** trong cùng collection (ví dụ FastEmbed sparse / SPLADE tương thích Qdrant).
-- Query: fusion dense + sparse để khớp tên riêng / thuật ngữ y khoa — vẫn một cluster Qdrant.
+Hybrid (dense + sparse, RRF) — không cần OpenSearch
+-------------------------------------------------
+- Vector tên **`dense`**: OpenAI embedding (LangChain).
+- Vector tên **`lexical`**: FastEmbed sparse (mặc định `Qdrant/bm25`).
+- Query: `Prefetch` dense + sparse, `FusionQuery(RRF)` trong Qdrant.
+- Collection cũ (chỉ dense): tự fallback dense-only; cần tạo lại collection để bật hybrid đầy đủ.
 """
 
 from __future__ import annotations

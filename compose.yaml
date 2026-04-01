@@ -1,0 +1,24 @@
+# Worker AI — compose độc lập (RabbitMQ/Qdrant qua URL trong .env, vd. localhost hoặc cloud).
+# Để gắn vào Docker Compose của medicalink-microservice, dùng compose.integrated.yaml.
+#
+#   docker compose up -d --build
+#
+# Batch sync một lần:
+#   docker compose run --rm medicalink-ai medicalink-ai-sync
+
+services:
+  medicalink-ai:
+    build: .
+    image: medicalink-ai:latest
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - medicalink_ai_cache:/app/.cache
+      - ./data:/app/data
+    # Cần thì bật để container gọi RabbitMQ/Qdrant trên máy host (Docker Desktop):
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
+
+volumes:
+  medicalink_ai_cache:

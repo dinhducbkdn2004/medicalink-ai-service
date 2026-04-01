@@ -6,24 +6,28 @@ from typing import Any
 from langchain_openai import OpenAIEmbeddings
 from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient
+from qdrant_client import models as qm
 from qdrant_client.models import (
     Distance,
     FieldCondition,
     Filter,
     MatchValue,
     PointStruct,
+    SparseVectorParams,
     VectorParams,
 )
 
 from medicalink_ai.doctor_knowledge import build_doctor_document, doctor_point_id
+from medicalink_ai.sparse_encoder import text_to_sparse_vector
 
 logger = logging.getLogger(__name__)
 
-# text-embedding-3-small
 DEFAULT_VECTOR_SIZE = 1536
 
 
 class DoctorVectorStore:
+    """Qdrant: hybrid (dense + sparse) hoặc legacy (chỉ dense, collection cũ)."""
+
     def __init__(
         self,
         qdrant: AsyncQdrantClient,
@@ -31,6 +35,12 @@ class DoctorVectorStore:
         collection_name: str,
         embedding_model: str,
         openai_api_key: str,
+        *,
+        hybrid_enabled: bool = True,
+        dense_name: str = "dense",
+        sparse_name: str = "lexical",
+        sparse_model_name: str = "Qdrant/bm25",
+        prefetch_limit: int = 40,
     ) -> None:
         self.qdrant = qdrant
         self.openai = openai
@@ -40,24 +50,73 @@ class DoctorVectorStore:
             model=embedding_model,
             api_key=openai_api_key,
         )
+        self.hybrid_enabled = hybrid_enabled
+        self.dense_name = dense_name
+        self.sparse_name = sparse_name
+        self.sparse_model_name = sparse_model_name
+        self.prefetch_limit = prefetch_limit
+        self._legacy_single_vector: bool | None = None
+
+    async def embed_text(self, text: str) -> list[float]:
+        return await self._embeddings.aembed_query(text.replace("\n", " ")[:8000])
+
+    async def _read_legacy_flag(self) -> bool:
+        if self._legacy_single_vector is not None:
+            return self._legacy_single_vector
+        try:
+            info = await self.qdrant.get_collection(self.collection_name)
+        except Exception:
+            self._legacy_single_vector = False
+            return False
+        sparse = info.config.params.sparse_vectors
+        has_sparse = bool(sparse and len(sparse) > 0)
+        self._legacy_single_vector = not has_sparse
+        if self._legacy_single_vector and self.hybrid_enabled:
+            logger.warning(
+                "Collection %s không có sparse vectors — chỉ dùng dense search. "
+                "Để bật hybrid: tạo lại collection hoặc đổi QDRANT_COLLECTION_NAME.",
+                self.collection_name,
+            )
+        return self._legacy_single_vector
 
     async def ensure_collection(self) -> None:
         try:
             await self.qdrant.get_collection(self.collection_name)
+            await self._read_legacy_flag()
             return
         except Exception:
             pass
-        await self.qdrant.create_collection(
-            collection_name=self.collection_name,
-            vectors_config=VectorParams(
-                size=DEFAULT_VECTOR_SIZE,
-                distance=Distance.COSINE,
-            ),
-        )
-        logger.info("Created Qdrant collection %s", self.collection_name)
 
-    async def embed_text(self, text: str) -> list[float]:
-        return await self._embeddings.aembed_query(text.replace("\n", " ")[:8000])
+        if self.hybrid_enabled:
+            await self.qdrant.create_collection(
+                collection_name=self.collection_name,
+                vectors_config={
+                    self.dense_name: VectorParams(
+                        size=DEFAULT_VECTOR_SIZE,
+                        distance=Distance.COSINE,
+                    ),
+                },
+                sparse_vectors_config={
+                    self.sparse_name: SparseVectorParams(),
+                },
+            )
+            self._legacy_single_vector = False
+            logger.info(
+                "Created hybrid Qdrant collection %s (%s + %s)",
+                self.collection_name,
+                self.dense_name,
+                self.sparse_name,
+            )
+        else:
+            await self.qdrant.create_collection(
+                collection_name=self.collection_name,
+                vectors_config=VectorParams(
+                    size=DEFAULT_VECTOR_SIZE,
+                    distance=Distance.COSINE,
+                ),
+            )
+            self._legacy_single_vector = True
+            logger.info("Created legacy Qdrant collection %s", self.collection_name)
 
     async def upsert_doctor(self, profile: dict[str, Any]) -> None:
         await self.ensure_collection()
@@ -65,18 +124,35 @@ class DoctorVectorStore:
         if not payload["doctor_id"]:
             logger.warning("skip upsert: missing doctor id in profile")
             return
-        vector = await self.embed_text(text)
+        dense = await self.embed_text(text)
         pid = doctor_point_id(payload["doctor_id"])
-        await self.qdrant.upsert(
-            collection_name=self.collection_name,
-            points=[
-                PointStruct(
-                    id=pid,
-                    vector=vector,
-                    payload=payload,
-                )
-            ],
-        )
+        legacy = await self._read_legacy_flag()
+        if legacy:
+            await self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    PointStruct(
+                        id=pid,
+                        vector=dense,
+                        payload=payload,
+                    )
+                ],
+            )
+        else:
+            sparse = text_to_sparse_vector(text, self.sparse_model_name)
+            await self.qdrant.upsert(
+                collection_name=self.collection_name,
+                points=[
+                    PointStruct(
+                        id=pid,
+                        vector={
+                            self.dense_name: dense,
+                            self.sparse_name: sparse,
+                        },
+                        payload=payload,
+                    )
+                ],
+            )
         logger.info("Upserted doctor vector %s", payload["doctor_id"])
 
     async def delete_doctor(self, doctor_profile_id: str) -> None:
@@ -88,27 +164,9 @@ class DoctorVectorStore:
         )
         logger.info("Deleted doctor vector %s", doctor_profile_id)
 
-    async def search_active(
-        self,
-        query_text: str,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        await self.ensure_collection()
-        vector = await self.embed_text(query_text)
-        flt = Filter(
-            must=[
-                FieldCondition(key="is_active", match=MatchValue(value=True)),
-            ]
-        )
-        hits = await self.qdrant.search(
-            collection_name=self.collection_name,
-            query_vector=vector,
-            query_filter=flt,
-            limit=limit,
-            with_payload=True,
-        )
+    def _payload_hits(self, scored: list[Any]) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
-        for h in hits:
+        for h in scored:
             pl = h.payload or {}
             out.append(
                 {
@@ -120,3 +178,58 @@ class DoctorVectorStore:
                 }
             )
         return out
+
+    async def search_active(
+        self,
+        query_text: str,
+        limit: int,
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
+        """
+        Trả về (candidates, hybrid_query_used, legacy_collection).
+
+        - hybrid_query_used: True nếu chạy prefetch dense+sparse + RRF.
+        - legacy_collection: True nếu collection chỉ có dense (schema cũ).
+        """
+        await self.ensure_collection()
+        legacy = await self._read_legacy_flag()
+        flt = Filter(
+            must=[
+                FieldCondition(key="is_active", match=MatchValue(value=True)),
+            ]
+        )
+        vector = await self.embed_text(query_text)
+
+        if legacy or not self.hybrid_enabled:
+            hits = await self.qdrant.search(
+                collection_name=self.collection_name,
+                query_vector=vector,
+                query_filter=flt,
+                limit=limit,
+                with_payload=True,
+            )
+            return self._payload_hits(hits), False, legacy
+
+        sparse = text_to_sparse_vector(query_text, self.sparse_model_name)
+        prefetch_limit = max(limit, self.prefetch_limit)
+        res = await self.qdrant.query_points(
+            collection_name=self.collection_name,
+            prefetch=[
+                qm.Prefetch(
+                    query=vector,
+                    using=self.dense_name,
+                    filter=flt,
+                    limit=prefetch_limit,
+                ),
+                qm.Prefetch(
+                    query=sparse,
+                    using=self.sparse_name,
+                    filter=flt,
+                    limit=prefetch_limit,
+                ),
+            ],
+            query=qm.FusionQuery(fusion=qm.Fusion.RRF),
+            limit=limit,
+            with_payload=True,
+        )
+        pts = res.points or []
+        return self._payload_hits(pts), True, False

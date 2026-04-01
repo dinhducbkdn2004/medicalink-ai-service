@@ -1,0 +1,3 @@
+[console_scripts]
+medicalink-ai-sync = medicalink_ai.scripts.batch_sync:cli
+medicalink-ai-worker = medicalink_ai.worker:main
