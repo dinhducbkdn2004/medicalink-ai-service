@@ -210,6 +210,11 @@ docker compose -f compose.integrated.yaml up -d --build
 
 ## Deploy (gợi ý)
 
+**Full stack (medicalink-microservice + worker AI trên server thật / Docker):** xem hướng dẫn chi tiết tiếng Việt trong repo backend tại  
+`medicalink-microservice/deployment/DEPLOYMENT_PRODUCTION_VI.md` (nếu clone hai repo cạnh nhau: `../medicalink-microservice/deployment/DEPLOYMENT_PRODUCTION_VI.md`).
+
+**CI/CD:** GitHub Actions — `.github/workflows/ci.yml` (kiểm tra + build image thử), `.github/workflows/cd-docker.yml` (đẩy image lên GHCR). Tổng quan hai repo: `medicalink-microservice/deployment/GITHUB_CI_CD.md`.
+
 ### 1. Máy chủ / VPS (systemd)
 
 1. Cài Docker hoặc Python 3.11+.

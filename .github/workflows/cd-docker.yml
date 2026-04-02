@@ -1,0 +1,109 @@
+# Build + push GHCR; trên push nhánh staging/main/master (và workflow_dispatch) tự deploy lên VM nếu có secrets VM_*.
+name: CD — Docker (GHCR)
+
+on:
+  push:
+    branches:
+      - staging
+      - main
+      - master
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag tùy chỉnh (để trống = theo nhánh/sha giống push)'
+        required: false
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    outputs:
+      deploy_tag: ${{ steps.tag.outputs.deploy_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: tag
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/medicalink-ai"
+          SHA="${{ github.sha }}"
+          SHORT="${SHA:0:7}"
+          TAGS=""
+
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            TAG="${{ github.event.inputs.image_tag }}"
+            TAGS="${IMAGE}:${TAG}"
+            echo "deploy_tag=$TAG" >> $GITHUB_OUTPUT
+          else
+            case "${{ github.ref }}" in
+              refs/heads/staging)
+                TAGS="${IMAGE}:staging-${SHA}"$'\n'"${IMAGE}:staging-${SHORT}"
+                echo "deploy_tag=staging-${SHA}" >> $GITHUB_OUTPUT
+                ;;
+              refs/heads/main|refs/heads/master)
+                TAGS="${IMAGE}:${SHA}"$'\n'"${IMAGE}:${SHORT}"$'\n'"${IMAGE}:latest"
+                echo "deploy_tag=${SHA}" >> $GITHUB_OUTPUT
+                ;;
+              *)
+                TAGS="${IMAGE}:workflow-${SHA}"
+                echo "deploy_tag=workflow-${SHA}" >> $GITHUB_OUTPUT
+                ;;
+            esac
+          fi
+
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "$TAGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.tag.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+
+  deploy-vm:
+    needs: build-push
+    runs-on: ubuntu-latest
+    if: |
+      needs.build-push.result == 'success'
+      && (
+        (github.event_name == 'push' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
+        || github.event_name == 'workflow_dispatch'
+      )
+    env:
+      VM_HOST: ${{ secrets.VM_HOST }}
+      VM_USER: ${{ secrets.VM_USER }}
+      VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy to VM
+        run: |
+          chmod +x scripts/deploy-ai-to-vm.sh
+          ./scripts/deploy-ai-to-vm.sh "${{ needs.build-push.outputs.deploy_tag }}"
