@@ -1,0 +1,26 @@
+# Chạy worker từ image GHCR (CI build) — không build tại chỗ trên VM.
+# Trước khi up: export MEDICALINK_AI_IMAGE=ghcr.io/<owner>/medicalink-ai:<tag>
+# Xem scripts/deploy-from-ghcr.sh
+
+services:
+  medicalink-ai:
+    image: ${MEDICALINK_AI_IMAGE:?set MEDICALINK_AI_IMAGE e.g. ghcr.io/org/medicalink-ai:production-abc123}
+    pull_policy: always
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - medicalink_ai_cache:/app/.cache
+      - ./data:/app/data
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - medicalink-network
+
+volumes:
+  medicalink_ai_cache:
+
+networks:
+  medicalink-network:
+    external: true
+    name: medicalink-network

@@ -1,5 +1,4 @@
-# Build + push GHCR; trên push nhánh staging/main/master (và workflow_dispatch) tự deploy lên VM nếu có secrets VM_*.
-name: CD — Docker (GHCR)
+name: AI — build image & deploy VM
 
 on:
   push:
@@ -9,27 +8,45 @@ on:
       - master
   workflow_dispatch:
     inputs:
-      image_tag:
-        description: 'Tag tùy chỉnh (để trống = theo nhánh/sha giống push)'
+      deploy_to_vm:
+        description: 'SSH lên VM và docker compose (cần secrets VM_*)'
+        required: false
+        type: boolean
+        default: true
+      image_tag_override:
+        description: 'Tag tùy chọn (để trống = staging-/production- theo nhánh)'
         required: false
         type: string
         default: ''
 
-permissions:
-  contents: read
-  packages: write
-
 env:
   REGISTRY: ghcr.io
+  IMAGE_NAME: medicalink-ai
 
 jobs:
-  build-push:
+  build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     outputs:
-      deploy_tag: ${{ steps.tag.outputs.deploy_tag }}
+      image_tag: ${{ steps.meta.outputs.image_tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Resolve image tag
+        id: meta
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag_override }}" ]; then
+            TAG="${{ github.event.inputs.image_tag_override }}"
+          elif [ "${{ github.ref_name }}" = "main" ] || [ "${{ github.ref_name }}" = "master" ]; then
+            TAG="production-${{ github.sha }}"
+          else
+            TAG="staging-${{ github.sha }}"
+          fi
+          echo "image_tag=$TAG" >> $GITHUB_OUTPUT
+          echo "IMAGE=${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}:$TAG" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -41,69 +58,37 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Image tags
-        id: tag
-        run: |
-          IMAGE="${{ env.REGISTRY }}/${{ github.repository_owner }}/medicalink-ai"
-          SHA="${{ github.sha }}"
-          SHORT="${SHA:0:7}"
-          TAGS=""
-
-          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
-            TAG="${{ github.event.inputs.image_tag }}"
-            TAGS="${IMAGE}:${TAG}"
-            echo "deploy_tag=$TAG" >> $GITHUB_OUTPUT
-          else
-            case "${{ github.ref }}" in
-              refs/heads/staging)
-                TAGS="${IMAGE}:staging-${SHA}"$'\n'"${IMAGE}:staging-${SHORT}"
-                echo "deploy_tag=staging-${SHA}" >> $GITHUB_OUTPUT
-                ;;
-              refs/heads/main|refs/heads/master)
-                TAGS="${IMAGE}:${SHA}"$'\n'"${IMAGE}:${SHORT}"$'\n'"${IMAGE}:latest"
-                echo "deploy_tag=${SHA}" >> $GITHUB_OUTPUT
-                ;;
-              *)
-                TAGS="${IMAGE}:workflow-${SHA}"
-                echo "deploy_tag=workflow-${SHA}" >> $GITHUB_OUTPUT
-                ;;
-            esac
-          fi
-
-          echo "tags<<EOF" >> $GITHUB_OUTPUT
-          echo "$TAGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
       - name: Build and push
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./Dockerfile
           push: true
-          tags: ${{ steps.tag.outputs.tags }}
+          tags: ${{ env.IMAGE }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
   deploy-vm:
-    needs: build-push
-    runs-on: ubuntu-latest
+    needs: build-and-push
     if: |
-      needs.build-push.result == 'success'
-      && (
-        (github.event_name == 'push' && (github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'))
-        || github.event_name == 'workflow_dispatch'
-      )
-    env:
-      VM_HOST: ${{ secrets.VM_HOST }}
-      VM_USER: ${{ secrets.VM_USER }}
-      VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
-      GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      GITHUB_REPOSITORY: ${{ github.repository }}
+      always() && needs.build-and-push.result == 'success' &&
+      (github.event_name == 'push' || github.event.inputs.deploy_to_vm == true)
+    runs-on: ubuntu-latest
+    environment: ${{ github.ref_name == 'main' && 'production' || github.ref_name == 'master' && 'production' || 'staging' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Deploy to VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_OWNER: ${{ github.repository_owner }}
+          VM_GIT_PULL: 'true'
         run: |
-          chmod +x scripts/deploy-ai-to-vm.sh
-          ./scripts/deploy-ai-to-vm.sh "${{ needs.build-push.outputs.deploy_tag }}"
+          chmod +x scripts/deploy-from-ghcr.sh
+          ./scripts/deploy-from-ghcr.sh "${{ needs.build-and-push.outputs.image_tag }}"
