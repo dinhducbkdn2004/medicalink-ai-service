@@ -3,7 +3,6 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from langchain_openai import OpenAIEmbeddings
 from openai import AsyncOpenAI
 from qdrant_client import AsyncQdrantClient
 from qdrant_client import models as qm
@@ -47,10 +46,6 @@ class DoctorVectorStore:
         self.openai = openai
         self.collection_name = collection_name
         self.embedding_model = embedding_model
-        self._embeddings = OpenAIEmbeddings(
-            model=embedding_model,
-            api_key=openai_api_key,
-        )
         self.hybrid_enabled = hybrid_enabled
         self.dense_name = dense_name
         self.sparse_name = sparse_name
@@ -59,7 +54,11 @@ class DoctorVectorStore:
         self._legacy_single_vector: bool | None = None
 
     async def embed_text(self, text: str) -> list[float]:
-        return await self._embeddings.aembed_query(text.replace("\n", " ")[:8000])
+        response = await self.openai.embeddings.create(
+            input=[text.replace("\n", " ")[:8000]],
+            model=self.embedding_model,
+        )
+        return response.data[0].embedding
 
     async def _read_legacy_flag(self) -> bool:
         if self._legacy_single_vector is not None:
