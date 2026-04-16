@@ -18,6 +18,7 @@ if [ -z "$GITHUB_OWNER" ]; then
   echo "Set GITHUB_OWNER or GITHUB_REPOSITORY" >&2
   exit 1
 fi
+GITHUB_OWNER=$(echo "$GITHUB_OWNER" | tr '[:upper:]' '[:lower:]')
 
 if [ -z "${VM_HOST:-}" ] || [ -z "${VM_USER:-}" ] || [ -z "${VM_SSH_KEY:-}" ] || [ -z "${GHCR_TOKEN:-}" ]; then
   echo "VM_HOST, VM_USER, VM_SSH_KEY, GHCR_TOKEN required" >&2
